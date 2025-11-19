@@ -16,14 +16,14 @@ RERANK_MODEL = "Qwen/Qwen3-Reranker-0.6B"
 GEN_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 
 DATA_DIR = "./data"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE_GENERATOR = "cuda" if torch.cuda.is_available() else "cpu"
 DEVICE_EMBEDDER = "cpu"
 DEVICE_RERANKER = "cpu"
 
 TOP_K = 5 # how many files to look through
 RERANK_TOP_K = 3 # how many to pass to ranker (top 3)
 MAX_GEN_TOKENS = 4096 # how many tokens to generate
-MAX_RERANKER_LENGTH = 1024 # how many reranker tokens to generate
+RERANKER_MAX_INPUT = 1024 # how many reranker tokens to generate
 ENABLED_THINKING = True # main model thinking
 
 STREAM_GENERATION_TOKENS = True # Streams the text as its generated from our ai for more responsive feel
@@ -40,9 +40,7 @@ def model_load_kwargs(device: str):
             "device_map": "auto"
         }
     else:
-        return {
-            # On CPU: do NOT include dtype or device_map
-        }
+        return {}
 
 # ============================================================
 # Qwen-native reranker (yes/no)
@@ -69,7 +67,7 @@ class QwenReranker:
 
         self.prefix_ids = self.tokenizer(self.prefix, add_special_tokens=False)["input_ids"]
         self.suffix_ids = self.tokenizer(self.suffix, add_special_tokens=False)["input_ids"]
-        self.max_length = MAX_RERANKER_LENGTH
+        self.max_length = RERANKER_MAX_INPUT
 
     def _format_pair(self, query: str, doc: str) -> str:
         return f"<Instruct>: Given a web search query, retrieve relevant passages.\n<Query>: {query}\n<Document>: {doc}"
@@ -109,7 +107,7 @@ class QwenReranker:
 # Qwen-native generator
 # ============================================================
 class Generator:
-    def __init__(self, model_name=GEN_MODEL, device=DEVICE):
+    def __init__(self, model_name=GEN_MODEL, device=DEVICE_GENERATOR):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_load_kwargs(device)).eval()
 
@@ -141,13 +139,10 @@ class Generator:
 
         with torch.no_grad():
             for _ in range(max_new_tokens):
-                outputs = self.model(generated_ids)
+                outputs = self.model(input_ids=generated_ids, attention_mask=torch.ones_like(generated_ids))
                 next_token_logits = outputs.logits[:, -1, :]
                 # sample token instead of argmax for diversity
-                #next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
-                next_token_id = torch.multinomial(
-                    torch.nn.functional.softmax(next_token_logits, dim=-1), num_samples=1
-                )
+                next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
 
                 generated_ids = torch.cat([generated_ids, next_token_id], dim=-1)
                 next_token_text = self.tokenizer.decode(next_token_id[0], skip_special_tokens=True)
@@ -171,7 +166,7 @@ class RAG:
 
         self.store = PersistentVectorStore(dim, data_dir=data_dir)
         self.reranker = QwenReranker(RERANK_MODEL, DEVICE_RERANKER)
-        self.generator = Generator(GEN_MODEL, DEVICE)
+        self.generator = Generator(GEN_MODEL, DEVICE_GENERATOR)
         self.webscraper = WebScraper()
 
     def retrieve(self, query: str, k=TOP_K):
@@ -239,7 +234,7 @@ class RAG:
 
 
 if __name__ == "__main__":
-    print(DEVICE)
+    print(DEVICE_GENERATOR)
     rag = RAG()
     try:
         while True:
