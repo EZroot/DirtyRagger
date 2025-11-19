@@ -1,10 +1,11 @@
 import os
 from typing import List
 import torch
+import fitz
+
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
 from bs4 import BeautifulSoup
-import fitz  # PyMuPDF
 
 from vector_store import PersistentVectorStore
 from web_scraper import WebScraper
@@ -20,9 +21,9 @@ DATA_DIR = "./data"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 TOP_K = 5
-RERANK_TOP_K = 5
-MAX_GEN_TOKENS = 1024
-
+RERANK_TOP_K = 3
+MAX_GEN_TOKENS = 256
+MAX_RERANKER_LENGTH = 1024
 # ============================================================
 # Helpers: PDF / HTML / Markdown cleaning
 # ============================================================
@@ -64,28 +65,27 @@ class QwenReranker:
 
         self.prefix_ids = self.tokenizer(self.prefix, add_special_tokens=False)["input_ids"]
         self.suffix_ids = self.tokenizer(self.suffix, add_special_tokens=False)["input_ids"]
-        self.max_length = 8192
+        self.max_length = MAX_RERANKER_LENGTH
 
     def _format_pair(self, query: str, doc: str) -> str:
         return f"<Instruct>: Given a web search query, retrieve relevant passages.\n<Query>: {query}\n<Document>: {doc}"
 
     def _prepare_inputs(self, texts: List[str]):
-        # Use __call__ directly for fast tokenizer batching
+        # Combine prefix/suffix directly into the text
+        batch_texts = [self.prefix + t + self.suffix for t in texts]
+
+        # Use __call__ directly (fast path) with padding/truncation
         enc = self.tokenizer(
-            texts,
-            padding=True,
+            batch_texts,
+            padding="max_length",
             truncation=True,
-            max_length=self.max_length - len(self.prefix_ids) - len(self.suffix_ids),
-            return_tensors="pt",
+            max_length=self.max_length,
+            return_tensors="pt"
         )
-        # Insert prefix/suffix manually
-        for i in range(len(enc["input_ids"])):
-            enc["input_ids"][i] = torch.cat([
-                torch.tensor(self.prefix_ids),
-                enc["input_ids"][i],
-                torch.tensor(self.suffix_ids)
-            ])
+
         return {k: v.to(self.model.device) for k, v in enc.items()}
+
+
 
     @torch.no_grad()
     def score(self, query: str, docs: List[str]) -> List[float]:
@@ -134,7 +134,7 @@ class RAG:
         self.reranker = QwenReranker(RERANK_MODEL, DEVICE)
         self.generator = Generator(GEN_MODEL, DEVICE)
         self.webscraper = WebScraper()
-        
+
     def retrieve(self, query: str, k=TOP_K):
         qvec = self.embedder.encode([query], convert_to_numpy=True)[0]
         return self.store.search(qvec, k)
@@ -146,9 +146,19 @@ class RAG:
         if docs:
             scores = self.reranker.score(query, docs)
             ranked = sorted(zip(docs, scores), key=lambda x: -x[1])
-            top_docs = [d for d, _ in ranked[:RERANK_TOP_K]]
+            # Extract the top docs and their scores
+            top_ranked = ranked[:RERANK_TOP_K]
+            top_docs = [d for d, _ in top_ranked]
+            top_scores = [s for _, s in top_ranked]
+
+            # Calculate a simple confidence score based on the highest ranked score
+            # You might use the mean, the max, or a threshold check depending on your reranker output
+            # Here we use the score of the top-ranked document as the confidence score.
+            confidence_score = top_scores[0] if top_scores else 0.0
+
         else:
             top_docs = []
+            confidence_score = 0.0
 
         context = "\n\n---\n\n".join(
             f"Passage {i+1}:\n{d}" for i, d in enumerate(top_docs)
@@ -162,16 +172,23 @@ class RAG:
             "'I don't know based on the provided passages.'"
         )
 
-        return self.generator.generate(prompt)
+        # Generate the answer
+        answer = self.generator.generate(prompt)
+
+        # Return the answer and the confidence score
+        return answer, confidence_score
 
 
 if __name__ == "__main__":
+    print(DEVICE)
     rag = RAG()
     try:
         while True:
             q = input("Query> ").strip()
             if not q:
                 continue
-            print("\n" + rag.generate_answer(q) + "\n")
+            answer, confidence = rag.generate_answer(q)
+            # Print both the answer and the confidence score
+            print(f"\nAnswer:\n{answer} [CONF:{confidence:.4f}]")
     except KeyboardInterrupt:
         print("\nExiting.")
