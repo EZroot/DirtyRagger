@@ -1,7 +1,6 @@
 import os
 from typing import List
 import torch
-import fitz
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
@@ -20,25 +19,13 @@ GEN_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 DATA_DIR = "./data"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-TOP_K = 5
-RERANK_TOP_K = 3
-MAX_GEN_TOKENS = 256
-MAX_RERANKER_LENGTH = 1024
-# ============================================================
-# Helpers: PDF / HTML / Markdown cleaning
-# ============================================================
-def clean_html(text: str) -> str:
-    return BeautifulSoup(text, "html.parser").get_text(separator="\n")
+TOP_K = 5 # how many files to look through
+RERANK_TOP_K = 3 # how many to pass to ranker (top 3)
+MAX_GEN_TOKENS = 256 # how many tokens to generate
+MAX_RERANKER_LENGTH = 1024 # how many reranker tokens to generate
+ENABLED_THINKING = False # main model thinking
 
-def clean_pdf(path: str) -> str:
-    doc = fitz.open(path)
-    return "\n".join([page.get_text() for page in doc])
-
-def clean_text_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
-
+STREAM_GENERATION_TOKENS = True # Streams the text as its generated from our ai for more responsive feel
 # ============================================================
 # Qwen-native reranker (yes/no)
 # ============================================================
@@ -114,14 +101,47 @@ class Generator:
     def generate(self, prompt: str, max_new_tokens=MAX_GEN_TOKENS) -> str:
         messages = [{"role": "user", "content": prompt}]
         text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=ENABLED_THINKING
         )
         inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
         out = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
         out_ids = out[0][inputs["input_ids"].shape[1]:]
         return self.tokenizer.decode(out_ids, skip_special_tokens=True)
 
+    @torch.no_grad()
+    def generate_stream(self, prompt: str, max_new_tokens=MAX_GEN_TOKENS):
+        """
+        Stream the output token by token
+        """
+        messages = [{"role": "user", "content": prompt}]
+        text = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=ENABLED_THINKING
+        )
 
+        inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+        generated_ids = inputs.input_ids.clone()
+
+        print("\nAnswer (streaming): ", end="", flush=True)
+
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                outputs = self.model(generated_ids)
+                next_token_logits = outputs.logits[:, -1, :]
+                # sample token instead of argmax for diversity
+                next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+
+                generated_ids = torch.cat([generated_ids, next_token_id], dim=-1)
+                next_token_text = self.tokenizer.decode(next_token_id[0], skip_special_tokens=True)
+
+                print(next_token_text, end="", flush=True)
+
+                if next_token_id.item() == self.tokenizer.eos_token_id:
+                    break
+
+        print()  # newline after streaming
+        output_ids = generated_ids[0][inputs.input_ids.shape[1]:]
+        return self.tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+    
 # ============================================================
 # RAG Pipeline
 # ============================================================
@@ -173,7 +193,10 @@ class RAG:
         )
 
         # Generate the answer
-        answer = self.generator.generate(prompt)
+        if STREAM_GENERATION_TOKENS:
+            answer = self.generator.generate_stream(prompt)
+        else:
+            answer = self.generator.generate(prompt)
 
         # Return the answer and the confidence score
         return answer, confidence_score
