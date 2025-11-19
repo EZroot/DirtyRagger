@@ -1,10 +1,9 @@
-import os
 from typing import List
 import torch
+import json
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
-from bs4 import BeautifulSoup
 
 from vector_store import PersistentVectorStore
 from web_scraper import WebScraper
@@ -23,14 +22,28 @@ DEVICE_RERANKER = "cpu"
 
 TOP_K = 5 # how many files to look through
 RERANK_TOP_K = 3 # how many to pass to ranker (top 3)
-MAX_GEN_TOKENS = 1024 # how many tokens to generate
+MAX_GEN_TOKENS = 4096 # how many tokens to generate
 MAX_RERANKER_LENGTH = 1024 # how many reranker tokens to generate
 ENABLED_THINKING = True # main model thinking
 
 STREAM_GENERATION_TOKENS = True # Streams the text as its generated from our ai for more responsive feel
 
-CONFIDENCE_SCORE_THRESHOLD_FOR_FREE_ANSWER = 0.5
-SEARCH_WEB_IF_LOW_CONFIDENCE = False;
+CONFIDENCE_SCORE_THRESHOLD_FOR_FREE_ANSWER = 0.5 # We revert to general knowledge + web search below this threshold
+SEARCH_WEB_IF_LOW_CONFIDENCE = True
+WEB_SEARCH_NUM_RESULT = 1 # This doesnt matter atm because we take the first element
+WEB_TOKEN_LIMIT = 512 # Gow many words we will use from our search result
+
+def model_load_kwargs(device: str):
+    if device == "cuda":
+        return {
+            "dtype": torch.float16,
+            "device_map": "auto"
+        }
+    else:
+        return {
+            # On CPU: do NOT include dtype or device_map
+        }
+
 # ============================================================
 # Qwen-native reranker (yes/no)
 # ============================================================
@@ -39,8 +52,7 @@ class QwenReranker:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            dtype="float16",
-            device_map="auto" if device == "cuda" else None
+            **model_load_kwargs(device)
         ).eval()
 
         self.token_false = self.tokenizer.convert_tokens_to_ids("no")
@@ -99,8 +111,7 @@ class QwenReranker:
 class Generator:
     def __init__(self, model_name=GEN_MODEL, device=DEVICE):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        kwargs = {"dtype": "float16", "device_map": "auto"} if device == "cuda" else {}
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs).eval()
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_load_kwargs(device)).eval()
 
     @torch.no_grad()
     def generate(self, prompt: str, max_new_tokens=MAX_GEN_TOKENS) -> str:
@@ -159,7 +170,7 @@ class RAG:
         dim = self.embedder.get_sentence_embedding_dimension()
 
         self.store = PersistentVectorStore(dim, data_dir=data_dir)
-        self.reranker = QwenReranker(RERANK_MODEL, DEVICE)
+        self.reranker = QwenReranker(RERANK_MODEL, DEVICE_RERANKER)
         self.generator = Generator(GEN_MODEL, DEVICE)
         self.webscraper = WebScraper()
 
@@ -201,12 +212,22 @@ class RAG:
                 "'I don't know based on the provided passages.'"
             )
         else:
+            # Web search + General knowledge for a more accurate answer
             if SEARCH_WEB_IF_LOW_CONFIDENCE:
-                # TODO: WEB SEARCH HELP HERE!
-                print("TODO: Implement web search help plz")
-            print("No relevant documents found. Answering based on general knowledge.")
-            prompt = f"Answer the following question based on your internal knowledge:\n\nQuestion: {query}"
+                web_search_result = self.webscraper.search(query, num_results=WEB_SEARCH_NUM_RESULT)
+                if web_search_result:
+                    # for i, result in enumerate(web_search_result):
+                    #     print(f"Result {i+1}:")
+                    #     print(f"  Title: {result['title']}")
+                    #     print(f"  URL:   {result['url']}")
+                    #     print("-" * 20)
 
+                    first_url = web_search_result[0]['url']
+                    plain_text = self.webscraper.scrape_url(first_url)
+                    filtered_result = plain_text[:WEB_TOKEN_LIMIT]
+                    prompt = f"Answer the following question based on your internal knowledge. Additional information context:{filtered_result}:\n\nQuestion: {query}"
+                else:
+                    prompt = f"Answer the following question based on your internal knowledge:\n\nQuestion: {query}"
         # Generate the answer
         if STREAM_GENERATION_TOKENS:
             answer = self.generator.generate_stream(prompt)
