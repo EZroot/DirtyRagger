@@ -18,23 +18,28 @@ GEN_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 
 DATA_DIR = "./data"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE_EMBEDDER = "cpu"
+DEVICE_RERANKER = "cpu"
 
 TOP_K = 5 # how many files to look through
 RERANK_TOP_K = 3 # how many to pass to ranker (top 3)
-MAX_GEN_TOKENS = 256 # how many tokens to generate
+MAX_GEN_TOKENS = 1024 # how many tokens to generate
 MAX_RERANKER_LENGTH = 1024 # how many reranker tokens to generate
-ENABLED_THINKING = False # main model thinking
+ENABLED_THINKING = True # main model thinking
 
 STREAM_GENERATION_TOKENS = True # Streams the text as its generated from our ai for more responsive feel
+
+CONFIDENCE_SCORE_THRESHOLD_FOR_FREE_ANSWER = 0.5
+SEARCH_WEB_IF_LOW_CONFIDENCE = False;
 # ============================================================
 # Qwen-native reranker (yes/no)
 # ============================================================
 class QwenReranker:
-    def __init__(self, model_name=RERANK_MODEL, device=DEVICE):
+    def __init__(self, model_name=RERANK_MODEL, device=DEVICE_RERANKER):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            dtype="auto",
+            dtype="float16",
             device_map="auto" if device == "cuda" else None
         ).eval()
 
@@ -94,7 +99,7 @@ class QwenReranker:
 class Generator:
     def __init__(self, model_name=GEN_MODEL, device=DEVICE):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        kwargs = {"dtype": "auto", "device_map": "auto"} if device == "cuda" else {}
+        kwargs = {"dtype": "float16", "device_map": "auto"} if device == "cuda" else {}
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs).eval()
 
     @torch.no_grad()
@@ -128,7 +133,10 @@ class Generator:
                 outputs = self.model(generated_ids)
                 next_token_logits = outputs.logits[:, -1, :]
                 # sample token instead of argmax for diversity
-                next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+                #next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+                next_token_id = torch.multinomial(
+                    torch.nn.functional.softmax(next_token_logits, dim=-1), num_samples=1
+                )
 
                 generated_ids = torch.cat([generated_ids, next_token_id], dim=-1)
                 next_token_text = self.tokenizer.decode(next_token_id[0], skip_special_tokens=True)
@@ -147,7 +155,7 @@ class Generator:
 # ============================================================
 class RAG:
     def __init__(self, data_dir=DATA_DIR):
-        self.embedder = SentenceTransformer(EMBED_MODEL, device=DEVICE)
+        self.embedder = SentenceTransformer(EMBED_MODEL, device=DEVICE_EMBEDDER)
         dim = self.embedder.get_sentence_embedding_dimension()
 
         self.store = PersistentVectorStore(dim, data_dir=data_dir)
@@ -180,17 +188,24 @@ class RAG:
             top_docs = []
             confidence_score = 0.0
 
-        context = "\n\n---\n\n".join(
-            f"Passage {i+1}:\n{d}" for i, d in enumerate(top_docs)
-        )
-
-        prompt = (
-            "Use the following context passages to answer the question.\n\n"
-            f"{context}\n\n"
-            f"Question: {query}\n\n"
-            "If the answer is not in the passages, say:\n"
-            "'I don't know based on the provided passages.'"
-        )
+        print(f"[DEBUG] Comparing {confidence_score} to {CONFIDENCE_SCORE_THRESHOLD_FOR_FREE_ANSWER}")
+        if confidence_score > CONFIDENCE_SCORE_THRESHOLD_FOR_FREE_ANSWER:
+            context = "\n\n---\n\n".join(
+                f"Passage {i+1}:\n{d}" for i, d in enumerate(top_docs)
+            )
+            prompt = (
+                "Use the following context passages to answer the question.\n\n"
+                f"{context}\n\n"
+                f"Question: {query}\n\n"
+                "If the answer is not in the passages, say:\n"
+                "'I don't know based on the provided passages.'"
+            )
+        else:
+            if SEARCH_WEB_IF_LOW_CONFIDENCE:
+                # TODO: WEB SEARCH HELP HERE!
+                print("TODO: Implement web search help plz")
+            print("No relevant documents found. Answering based on general knowledge.")
+            prompt = f"Answer the following question based on your internal knowledge:\n\nQuestion: {query}"
 
         # Generate the answer
         if STREAM_GENERATION_TOKENS:
@@ -212,6 +227,8 @@ if __name__ == "__main__":
                 continue
             answer, confidence = rag.generate_answer(q)
             # Print both the answer and the confidence score
-            print(f"\nAnswer:\n{answer} [CONF:{confidence:.4f}]")
+            if not STREAM_GENERATION_TOKENS:
+                print(f"\nAnswer:\n{answer} [CONF:{confidence:.4f}]")
+
     except KeyboardInterrupt:
         print("\nExiting.")
