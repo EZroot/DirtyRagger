@@ -13,7 +13,7 @@ from web_scraper import WebScraper
 # -----------------------------
 EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 RERANK_MODEL = "Qwen/Qwen3-Reranker-0.6B"
-GEN_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
+GEN_MODEL = "Qwen/Qwen3-1.7B"
 
 DATA_DIR = "./data"
 DEVICE_GENERATOR = "cuda" if torch.cuda.is_available() else "cpu"
@@ -24,7 +24,7 @@ TOP_K = 5 # how many files to look through
 RERANK_TOP_K = 3 # how many to pass to ranker (top 3)
 MAX_GEN_TOKENS = 4096 # how many tokens to generate
 RERANKER_MAX_INPUT = 1024 # how many reranker tokens to generate
-ENABLED_THINKING = True # main model thinking
+ENABLED_THINKING = False # main model thinking
 
 STREAM_GENERATION_TOKENS = True # Streams the text as its generated from our ai for more responsive feel
 
