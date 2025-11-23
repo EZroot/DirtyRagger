@@ -1,3 +1,5 @@
 __pycache__/
 documents/
 data/
+config.ini
+qwen_env/

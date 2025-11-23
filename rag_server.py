@@ -1,6 +1,13 @@
-from typing import List
+from typing import List, AsyncGenerator
 import torch
 import json
+import uvicorn
+import asyncio
+from contextlib import asynccontextmanager # NEW: For modern lifespan handling
+
+# IMPORTANT: Ensure all required components are imported from fastapi
+from fastapi import FastAPI, Query, HTTPException 
+from starlette.responses import StreamingResponse 
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig 
 from sentence_transformers import SentenceTransformer
@@ -20,42 +27,41 @@ DEVICE_GENERATOR = "cuda" if torch.cuda.is_available() else "cpu"
 DEVICE_EMBEDDER = "cpu"
 DEVICE_RERANKER = "cpu"
 
-TOP_K = 5 # how many files to look through
-RERANK_TOP_K = 3 # how many to pass to ranker (top 3)
-MAX_GEN_TOKENS = 4096 # how many tokens to generate
-RERANKER_MAX_INPUT = 1024 # how many reranker tokens to generate
-ENABLED_THINKING = False # main model thinking
+TOP_K = 5 
+RERANK_TOP_K = 3 
+MAX_GEN_TOKENS = 4096 
+RERANKER_MAX_INPUT = 1024 
+ENABLED_THINKING = False 
+STREAM_GENERATION_TOKENS = True # Always True for this streaming API
 
-STREAM_GENERATION_TOKENS = True # Streams the text as its generated from our ai for more responsive feel
-
-CONFIDENCE_SCORE_THRESHOLD_FOR_FREE_ANSWER = 0.5 # We revert to general knowledge + web search below this threshold
+CONFIDENCE_SCORE_THRESHOLD_FOR_FREE_ANSWER = 0.5 
 SEARCH_WEB_IF_LOW_CONFIDENCE = True
-WEB_SEARCH_NUM_RESULT = 1 # This doesnt matter atm because we take the first element
-WEB_TOKEN_LIMIT = 512 # Gow many words we will use from our search result
+WEB_SEARCH_NUM_RESULT = 1 
+WEB_TOKEN_LIMIT = 512 
 BNB_COMPUTE_DTYPE = torch.float16 
 
 def model_load_kwargs(device: str):
     if device == "cuda":
         # 1. Define the 4-bit Quantization Configuration
         bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True, # Enable 4-bit quantization
-            bnb_4bit_use_double_quant=True, # Nested quantization for better performance
-            bnb_4bit_quant_type="nf4", # NormalFloat 4-bit type
-            bnb_4bit_compute_dtype=BNB_COMPUTE_DTYPE # Use float16 for computation
+            load_in_4bit=True, 
+            bnb_4bit_use_double_quant=True, 
+            bnb_4bit_quant_type="nf4", 
+            bnb_4bit_compute_dtype=BNB_COMPUTE_DTYPE 
         )
         
         # 2. Return the config along with device_map
         return {
-            "quantization_config": bnb_config, # Pass the new quantization config
-            "dtype": torch.float16, # Keep this for the rest of the model layers
-            "device_map": "auto" # Required for multi-device/quantized loading
+            "quantization_config": bnb_config, 
+            "dtype": torch.float16, 
+            "device_map": "auto", 
+            "trust_remote_code": True
         }
     else:
-        # Quantization is typically CUDA-only
-        return {}
+        return {"trust_remote_code": True} 
 
 # ============================================================
-# Qwen-native reranker (yes/no)
+# Qwen-native reranker 
 # ============================================================
 class QwenReranker:
     def __init__(self, model_name=RERANK_MODEL, device=DEVICE_RERANKER):
@@ -85,10 +91,8 @@ class QwenReranker:
         return f"<Instruct>: Given a web search query, retrieve relevant passages.\n<Query>: {query}\n<Document>: {doc}"
 
     def _prepare_inputs(self, texts: List[str]):
-        # Combine prefix/suffix directly into the text
         batch_texts = [self.prefix + t + self.suffix for t in texts]
 
-        # Use __call__ directly (fast path) with padding/truncation
         enc = self.tokenizer(
             batch_texts,
             padding="max_length",
@@ -98,7 +102,6 @@ class QwenReranker:
         )
 
         return {k: v.to(self.model.device) for k, v in enc.items()}
-
 
 
     @torch.no_grad()
@@ -114,7 +117,6 @@ class QwenReranker:
         probs = torch.nn.functional.log_softmax(stacked, dim=1).exp()
         return probs[:, 1].tolist()
 
-
 # ============================================================
 # Qwen-native generator
 # ============================================================
@@ -123,12 +125,12 @@ class Generator:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
                     model_name, 
-                    **model_load_kwargs(device),
-                    trust_remote_code=True # Qwen models often need this
+                    **model_load_kwargs(device)
                 ).eval()
         
     @torch.no_grad()
     def generate(self, prompt: str, max_new_tokens=MAX_GEN_TOKENS) -> str:
+        # Non-streaming implementation (kept for completeness)
         messages = [{"role": "user", "content": prompt}]
         text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=ENABLED_THINKING
@@ -139,9 +141,9 @@ class Generator:
         return self.tokenizer.decode(out_ids, skip_special_tokens=True)
 
     @torch.no_grad()
-    def generate_stream(self, prompt: str, max_new_tokens=MAX_GEN_TOKENS):
+    async def generate_stream(self, prompt: str, max_new_tokens=MAX_GEN_TOKENS) -> AsyncGenerator[str, None]:
         """
-        Stream the output token by token
+        Stream the output token by token, yielding text chunks for the HTTP server.
         """
         messages = [{"role": "user", "content": prompt}]
         text = self.tokenizer.apply_chat_template(
@@ -150,33 +152,36 @@ class Generator:
 
         inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
         generated_ids = inputs.input_ids.clone()
-
-        print("\nAnswer (streaming): ", end="", flush=True)
+        
+        print("[SERVER] Starting stream generation...") 
 
         with torch.no_grad():
             for _ in range(max_new_tokens):
+                # Note: This is a simplified generation loop. A true high-performance
+                # streaming implementation would leverage key/value cache for speed.
                 outputs = self.model(input_ids=generated_ids, attention_mask=torch.ones_like(generated_ids))
                 next_token_logits = outputs.logits[:, -1, :]
-                # sample token instead of argmax for diversity
                 next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
 
                 generated_ids = torch.cat([generated_ids, next_token_id], dim=-1)
                 next_token_text = self.tokenizer.decode(next_token_id[0], skip_special_tokens=True)
 
-                print(next_token_text, end="", flush=True)
+                if next_token_text:
+                    yield next_token_text
+                    # Use asyncio.sleep(0) to yield control back to the event loop
+                    await asyncio.sleep(0) 
 
                 if next_token_id.item() == self.tokenizer.eos_token_id:
                     break
-
-        print()  # newline after streaming
-        output_ids = generated_ids[0][inputs.input_ids.shape[1]:]
-        return self.tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+        
+        pass
     
 # ============================================================
 # RAG Pipeline
 # ============================================================
 class RAG:
     def __init__(self, data_dir=DATA_DIR):
+        print(f"[{self.__class__.__name__}] Initializing RAG components...")
         self.embedder = SentenceTransformer(EMBED_MODEL, device=DEVICE_EMBEDDER)
         dim = self.embedder.get_sentence_embedding_dimension()
 
@@ -184,26 +189,26 @@ class RAG:
         self.reranker = QwenReranker(RERANK_MODEL, DEVICE_RERANKER)
         self.generator = Generator(GEN_MODEL, DEVICE_GENERATOR)
         self.webscraper = WebScraper()
+        print(f"[{self.__class__.__name__}] Initialization complete.")
+
 
     def retrieve(self, query: str, k=TOP_K):
         qvec = self.embedder.encode([query], convert_to_numpy=True)[0]
         return self.store.search(qvec, k)
 
     def generate_answer(self, query: str):
+        """
+        Generates the answer, returning an async generator and the confidence score.
+        """
         hits = self.retrieve(query, TOP_K)
         docs = [h["text"] for h in hits]
 
         if docs:
             scores = self.reranker.score(query, docs)
             ranked = sorted(zip(docs, scores), key=lambda x: -x[1])
-            # Extract the top docs and their scores
             top_ranked = ranked[:RERANK_TOP_K]
             top_docs = [d for d, _ in top_ranked]
             top_scores = [s for _, s in top_ranked]
-
-            # Calculate a simple confidence score based on the highest ranked score
-            # You might use the mean, the max, or a threshold check depending on your reranker output
-            # Here we use the score of the top-ranked document as the confidence score.
             confidence_score = top_scores[0] if top_scores else 0.0
 
         else:
@@ -211,6 +216,8 @@ class RAG:
             confidence_score = 0.0
 
         print(f"[DEBUG] Comparing {confidence_score} to {CONFIDENCE_SCORE_THRESHOLD_FOR_FREE_ANSWER}")
+        
+        # --- Prompt Construction Logic ---
         if confidence_score > CONFIDENCE_SCORE_THRESHOLD_FOR_FREE_ANSWER:
             context = "\n\n---\n\n".join(
                 f"Passage {i+1}:\n{d}" for i, d in enumerate(top_docs)
@@ -223,44 +230,81 @@ class RAG:
                 "'I don't know based on the provided passages.'"
             )
         else:
-            # Web search + General knowledge for a more accurate answer
             if SEARCH_WEB_IF_LOW_CONFIDENCE:
                 web_search_result = self.webscraper.search(query, num_results=WEB_SEARCH_NUM_RESULT)
                 if web_search_result:
-                    # for i, result in enumerate(web_search_result):
-                    #     print(f"Result {i+1}:")
-                    #     print(f"  Title: {result['title']}")
-                    #     print(f"  URL:   {result['url']}")
-                    #     print("-" * 20)
-
                     first_url = web_search_result[0]['url']
                     plain_text = self.webscraper.scrape_url(first_url)
                     filtered_result = plain_text[:WEB_TOKEN_LIMIT]
                     prompt = f"Answer the following question based on your internal knowledge. Additional information context:{filtered_result}:\n\nQuestion: {query}"
                 else:
                     prompt = f"Answer the following question based on your internal knowledge:\n\nQuestion: {query}"
-        # Generate the answer
-        if STREAM_GENERATION_TOKENS:
-            answer = self.generator.generate_stream(prompt)
-        else:
-            answer = self.generator.generate(prompt)
+        
+        # --- Streaming Server Response Logic ---
+        
+        # This nested async generator will handle the two-part response structure
+        async def streaming_generator() -> AsyncGenerator[str, None]:
+            # 1. Yield JSON metadata first
+            metadata = {"confidence": confidence_score}
+            # NOTE: We do not yield a newline separator here.
+            yield json.dumps(metadata)
+            
+            # 2. Stream the text chunks
+            async for chunk in self.generator.generate_stream(prompt):
+                yield chunk
+        
+        return streaming_generator(), confidence_score
 
-        # Return the answer and the confidence score
-        return answer, confidence_score
 
+# ============================================================
+# FastAPI Server Setup
+# ============================================================
+global global_rag
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initializes the RAG model components when the server starts (replaces @app.on_event)."""
+    global global_rag
+    print(f"[{app.title}] Server starting up. Initializing RAG...")
+    # NOTE: The models load here, this will take time!
+    global_rag = RAG()
+    print(f"[{app.title}] RAG components loaded.")
+    yield # Server runs here
+    # Optional cleanup code here
+
+# Create the FastAPI application instance using the modern lifespan
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/")
+def read_root():
+    return {"status": "ok", "message": "RAG API is running. Use /query to ask a question."}
+
+
+# NOTE: The dummy streaming_generator function has been removed.
+@app.post("/query")
+async def query_llm_stream(query: str = Query(..., description="The query to send to the LLM.")):
+    """
+    The main endpoint for streaming responses, using the RAG object's internal generator.
+    """
+    
+    if not global_rag:
+        raise HTTPException(status_code=503, detail="RAG system is still loading. Please wait.")
+        
+    # Check for empty query
+    if not query:
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+    # Get the generator from the RAG object (tuple is generator, confidence_score)
+    generator, _ = global_rag.generate_answer(query)
+
+    # Use StreamingResponse with the actual generator
+    return StreamingResponse(
+        content=generator,
+        media_type="application/json" # Changed media type to something simpler
+    )
 
 if __name__ == "__main__":
-    print(DEVICE_GENERATOR)
-    rag = RAG()
-    try:
-        while True:
-            q = input("Query> ").strip()
-            if not q:
-                continue
-            answer, confidence = rag.generate_answer(q)
-            # Print both the answer and the confidence score
-            if not STREAM_GENERATION_TOKENS:
-                print(f"\nAnswer:\n{answer} [CONF:{confidence:.4f}]")
-
-    except KeyboardInterrupt:
-        print("\nExiting.")
+    print(f"Starting RAG Server on {DEVICE_GENERATOR}...")
+    # The RAG object will be initialized in the startup_event (now lifespan)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
