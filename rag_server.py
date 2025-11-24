@@ -30,14 +30,14 @@ DEVICE_RERANKER = "cpu"
 TOP_K = 5 
 RERANK_TOP_K = 3 
 MAX_GEN_TOKENS = 4096 
-RERANKER_MAX_INPUT = 1024 
+RERANKER_MAX_INPUT = 4096 
 ENABLED_THINKING = False 
 STREAM_GENERATION_TOKENS = True # Always True for this streaming API
 
 CONFIDENCE_SCORE_THRESHOLD_FOR_FREE_ANSWER = 0.5 
 SEARCH_WEB_IF_LOW_CONFIDENCE = True
 WEB_SEARCH_NUM_RESULT = 1 
-WEB_TOKEN_LIMIT = 512 
+WEB_TOKEN_LIMIT = 4096 
 BNB_COMPUTE_DTYPE = torch.float16 
 
 def model_load_kwargs(device: str):
@@ -234,6 +234,10 @@ class RAG:
                 web_search_result = self.webscraper.search(query, num_results=WEB_SEARCH_NUM_RESULT)
                 if web_search_result:
                     first_url = web_search_result[0]['url']
+                    
+                    # 💡 THE FIX: Print the URL selected for scraping
+                    print(f"[RAG Web] Scraping URL: {first_url}")
+                    
                     plain_text = self.webscraper.scrape_url(first_url)
                     filtered_result = plain_text[:WEB_TOKEN_LIMIT]
                     prompt = f"Answer the following question based on your internal knowledge. Additional information context:{filtered_result}:\n\nQuestion: {query}"

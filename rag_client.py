@@ -79,4 +79,8 @@ def query_streaming_api(api_url: str, query: str):
     print("\n\n--- Stream Finished ---")
     
 if __name__ == "__main__":
-    query_streaming_api(API_URL, EXAMPLE_QUERY)
+    while True:
+            q = input("Query> ").strip()
+            if not q:
+                continue
+            query_streaming_api(API_URL, q)

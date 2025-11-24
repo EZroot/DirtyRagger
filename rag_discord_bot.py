@@ -4,7 +4,15 @@ from discord import app_commands
 import configparser
 import asyncio
 import os
-from rag_api_client import query_rag_api # Import the client function
+import re
+from rag_api_client import query_rag_api
+
+# -----------------------------
+# Discord & Client Settings
+# -----------------------------
+DISCORD_MAX_CHARS = 2000 # The character limit for a single Discord message
+TRUNCATION_SUFFIX = "\n\n... (Response cut short to maintain coherence and character limit)"
+
 
 # --- Configuration Loading ---
 def load_config():
@@ -42,13 +50,33 @@ GUILD_ID = config.get('DISCORD', 'GUILD_ID') # Optional
 RAG_URL = config.get('RAG_SERVER', 'BASE_URL') + config.get('RAG_SERVER', 'QUERY_ENDPOINT')
 
 # --- Bot Setup ---
-# Setup the bot intents. Since we are only using slash commands, 
-# we can safely use Intents.default() without requiring the privileged 'message_content' intent.
 intents = discord.Intents.default()
-# intents.message_content = True # REMOVED: No longer necessary, fixing the PrivilegedIntentsRequired error
-
-# Initialize the bot with intents
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+# --- Coherent Truncation Function ---
+
+def coherent_truncate(text: str, max_len: int, suffix: str) -> str:
+    """
+    Truncates a string coherently to a maximum length by looking for the last
+    sentence-ending punctuation mark.
+    """
+    if len(text) <= max_len:
+        return text
+
+    # 1. Hard-cut to just before the limit, leaving space for the suffix
+    limit = max_len - len(suffix)
+    truncated_segment = text[:limit]
+
+    # 2. Find the last sentence-ending punctuation followed by whitespace
+    matches = list(re.finditer(r'[.!?](?:\s+|\n\n|\n)', truncated_segment))
+
+    if matches:
+        # Get the end index of the last match (the clean cut-off point)
+        clean_cut_index = matches[-1].end()
+        return truncated_segment[:clean_cut_index] + suffix
+    
+    # 3. Fallback: If no punctuation is found (e.g., code block), hard truncate
+    return truncated_segment.strip() + suffix
 
 # --- Discord Events ---
 
@@ -58,7 +86,6 @@ async def on_ready():
     print(f'Logged in as {bot.user} (ID: {bot.user.id})')
     
     if GUILD_ID:
-        # Register commands to a specific guild for faster testing
         try:
             guild = discord.Object(id=int(GUILD_ID))
             bot.tree.copy_global_to(guild=guild)
@@ -68,7 +95,6 @@ async def on_ready():
             print(f"Could not sync commands to guild: {e}. Check GUILD_ID in config.ini.")
             
     else:
-        # Register global commands (takes up to 1 hour)
         await bot.tree.sync()
         print("Commands synced globally. May take up to 1 hour to appear.")
         
@@ -82,55 +108,68 @@ async def rag_query_command(interaction: discord.Interaction, prompt: str):
     """
     The main RAG query command. Handles deferred response and streaming updates.
     """
-    # 1. Defer the response immediately. This tells Discord we need time to process.
     await interaction.response.defer()
 
-    # 2. Call the asynchronous client function
     confidence, text_generator = await query_rag_api(RAG_URL, prompt)
 
-    # 3. Handle Streaming and Response Updates
     full_response = ""
-    # Start with a message header that includes the confidence score
+    
+    # Calculate the max length for the streaming content *after* the header
     initial_message = (
         f"**RAG Query:** `{prompt}`\n"
         f"**Confidence:** `{confidence:.2f}`\n"
         f"**Answer:**\n"
     )
+    # Use the global constant here:
+    max_text_len = DISCORD_MAX_CHARS - len(initial_message) - len(TRUNCATION_SUFFIX)
     
-    # Use a variable to track the last time we updated Discord, to avoid hitting rate limits
+    # --- Streaming and Response Updates ---
     last_update_time = asyncio.get_event_loop().time()
-    MIN_UPDATE_INTERVAL = 1.0 # Update Discord max once per second
+    MIN_UPDATE_INTERVAL = 1.0 
+    is_truncated = False
     
     # Send the initial header
     await interaction.edit_original_response(content=initial_message)
 
-
     try:
-        # Iterate over the text chunks from the generator
         async for chunk in text_generator:
+            if is_truncated:
+                break
+
             full_response += chunk
             
+            if len(full_response) > max_text_len:
+                is_truncated = True
+
             current_time = asyncio.get_event_loop().time()
-            # Only update the Discord message if enough time has passed
-            if current_time - last_update_time >= MIN_UPDATE_INTERVAL:
-                # Truncate response to Discord's 2000 character limit, saving space for header
-                content = initial_message + full_response
-                if len(content) > 2000:
-                    content = initial_message + full_response[:1900] + "\n... (truncated)"
+            if current_time - last_update_time >= MIN_UPDATE_INTERVAL or is_truncated:
+                
+                display_text = full_response
+                if is_truncated:
+                    display_text = coherent_truncate(full_response, max_text_len, TRUNCATION_SUFFIX)
+                
+                content = initial_message + display_text
                 
                 await interaction.edit_original_response(content=content)
                 last_update_time = current_time
 
+                if is_truncated:
+                    break
+
     except Exception as e:
         error_message = f"An error occurred during streaming: {str(e)}"
-        await interaction.edit_original_response(content=initial_message + full_response + f"\n\n**{error_message}**")
+        final_content = initial_message + coherent_truncate(full_response, max_text_len, "")
+        final_content += f"\n\n**{error_message}**"
+        await interaction.edit_original_response(content=final_content[:DISCORD_MAX_CHARS])
         return
 
-    # 4. Final Update: Ensure the complete, final text is sent
-    final_content = initial_message + full_response
-    if len(final_content) > 2000:
-        final_content = initial_message + full_response[:1990] + "\n\n...(Full text exceeded 2000 characters)"
+    # 4. Final Update
+    final_response_text = full_response
+    if len(full_response) > max_text_len:
+        final_response_text = coherent_truncate(full_response, max_text_len, TRUNCATION_SUFFIX)
 
+    final_content = initial_message + final_response_text
+    
     await interaction.edit_original_response(content=final_content)
 
 
