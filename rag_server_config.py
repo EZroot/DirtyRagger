@@ -26,7 +26,8 @@ class RAGConfig:
         "RAG_SETTINGS": {
             "USE_WEB_SCRAPER": True,
             "MAX_SCRAPE_CHARS": 2000,
-            "QWEN_PERSONALITY_RESPONSE_TOKENS": 256
+            "QWEN_PERSONALITY_RESPONSE_TOKENS": 256,
+            "RERANKER_MIN_SCORE_THRESHOLD": 0.5
         },
         "QWEN_PERSONALITY_PROMPT_LINES": [
             "**You are DirtyRagger** - a highly capable and intelligent large language model. Your primary goal is to provide concise, accurate, and helpful answers.",
@@ -111,6 +112,7 @@ class RAGConfig:
         # --- RAG and Web Scraper Configuration ---
         self.USE_WEB_SCRAPER = data['RAG_SETTINGS']['USE_WEB_SCRAPER']
         self.MAX_SCRAPE_CHARS = data['RAG_SETTINGS']['MAX_SCRAPE_CHARS']
+        self.RERANKER_MIN_SCORE_THRESHOLD = data['RAG_SETTINGS']['RERANKER_MIN_SCORE_THRESHOLD']
 
         # --- Personality and Response Configuration ---
         self.QWEN_PERSONALITY_RESPONSE_TOKENS = data['RAG_SETTINGS']['QWEN_PERSONALITY_RESPONSE_TOKENS']

@@ -73,7 +73,7 @@ async def on_ready():
 
 # --- Slash Command ---
 
-@bot.tree.command(name="ask_local", description="Ask dirty ragger your desire.")
+@bot.tree.command(name="ask", description="Ask dirty ragger your desire.")
 @app_commands.describe(prompt="The question you want to ask.")
 async def rag_query_command(interaction: discord.Interaction, prompt: str):
     await interaction.response.defer()
@@ -87,19 +87,6 @@ async def rag_query_command(interaction: discord.Interaction, prompt: str):
     response = response_data['response']
     response.replace("<|im_end|>", " ") # filter out qwen bullshit
 
-    final_response_text = "**User:** " + prompt + "\n"
-    final_response_text = final_response_text + "**Answer**\n" + response
-    await interaction.edit_original_response(content=final_response_text)
-
-@bot.tree.command(name="ask_web", description="Ask dirty ragger your desire.. But with web search")
-@app_commands.describe(prompt="The question you want to ask.")
-async def rag_query_command(interaction: discord.Interaction, prompt: str):
-    await interaction.response.defer()
-
-    response_data = await query_rag_api_json(RAG_URL_WEB_QUERY, prompt)
-    response = response_data['response']
-    response.replace("<|im_end|>", " ") # filter out qwen bullshit
-    
     final_response_text = "**User:** " + prompt + "\n"
     final_response_text = final_response_text + "**Answer**\n" + response
     await interaction.edit_original_response(content=final_response_text)

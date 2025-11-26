@@ -49,8 +49,6 @@ class ToolParseAndExecute:
                 print("\n--- Parsed Python Dictionary ---")
                 print(tool_dict)
                 print(f"\nTool Name: {tool_dict.get('name')}")
-                print(f"\nTool Params: {tool_dict.get('arguments')}")
-                print(f"\nTool Endpoint: {tool_dict.get('endpoint_url')}")
                 tool_name = tool_dict.get('name')
 
                 # use built in hardcoded tools first
