@@ -14,7 +14,7 @@ DISCORD_MAX_CHARS = 2000 # The character limit for a single Discord message
 def load_config():
     """Loads configuration from config.ini, creating a template if it doesn't exist."""
     config = configparser.ConfigParser()
-    config_path = 'config.ini'
+    config_path = 'discord_bot_config.ini'
 
     if not os.path.exists(config_path):
         print("config.ini not found. Creating a template now.")
@@ -25,7 +25,7 @@ def load_config():
         with open(config_path, 'w') as f:
             config.write(f)
         
-        print("Please edit 'config.ini' with your Discord Bot Token and run the script again.")
+        print("Please edit 'discord_bot_config.ini' with your Discord Bot Token and run the script again.")
         exit()
 
     config.read(config_path)
