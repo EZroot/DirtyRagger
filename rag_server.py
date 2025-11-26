@@ -8,30 +8,11 @@ from typing import List, Dict, Any, Callable
 
 import uvicorn
 
-from web_scraper import WebScraper 
+from rag_server_config import RAGConfig
+from rag_server_tool_pass import ToolParseAndExecute
 
-
-EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-RERANK_MODEL = "Qwen/Qwen3-Reranker-0.6B"
-GEN_MODEL = "Qwen/Qwen3-4B-Instruct-2507"#"Qwen/Qwen3-1.7B" #"Qwen/Qwen3-4B-Instruct-2507"
-
-DATA_DIR = "./data"
-DEVICE_GENERATOR = "cuda" if torch.cuda.is_available() else "cpu"
-DEVICE_EMBEDDER = "cpu"
-DEVICE_RERANKER = "cpu"
-
-MAX_GEN_TOKENS = 4096
-ENABLED_THINKING = False
-BNB_COMPUTE_DTYPE = torch.float16
-
-USE_WEB_SCRAPER = True
-MAX_SCRAPE_CHARS = 2000
-
-QWEN_PERSONALITY_RESPONSE_TOKENS = 256
-QWEN_PERSONALITY_PROMPT = "\n".join([
-    "Be concise, sarcastic and blunt.",
-    f"**TRY TO LIMIT TOKENS TO {QWEN_PERSONALITY_RESPONSE_TOKENS} OR LESS.**",
-])
+global SERVER_CONFIG
+SERVER_CONFIG = RAGConfig()
 
 def model_load_kwargs(device: str) -> Dict[str, Any]:
     common = {"trust_remote_code": True}
@@ -40,7 +21,7 @@ def model_load_kwargs(device: str) -> Dict[str, Any]:
             load_in_4bit=True,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=BNB_COMPUTE_DTYPE,
+            bnb_4bit_compute_dtype=SERVER_CONFIG.BNB_COMPUTE_DTYPE,
         )
         return {
             **common,
@@ -58,7 +39,7 @@ def model_load_kwargs(device: str) -> Dict[str, Any]:
         }
     
 class Generator:
-    def __init__(self, model_name=GEN_MODEL, device=DEVICE_GENERATOR):
+    def __init__(self, model_name=SERVER_CONFIG.GEN_MODEL, device=SERVER_CONFIG.DEVICE_GENERATOR):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
                     model_name, 
@@ -68,10 +49,15 @@ class Generator:
             self.model = torch.compile(self.model, mode="reduce-overhead")
             
     @torch.no_grad()
-    def generate(self, messages: List[dict], max_new_tokens=MAX_GEN_TOKENS) -> str:
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=ENABLED_THINKING
-        )
+    def generate(self, messages: List[dict], usetools: bool, max_new_tokens=SERVER_CONFIG.MAX_GEN_TOKENS) -> str:
+        if usetools:
+            text = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, enable_thinking=SERVER_CONFIG.ENABLED_THINKING, tools=SERVER_CONFIG.TOOL_SCHEMAS
+            )
+        else:
+            text = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, enable_thinking=SERVER_CONFIG.ENABLED_THINKING
+            )
         
         enc = self.tokenizer([text], return_tensors="pt")
         # move each tensor directly to target device to avoid temporary full-GPU copy
@@ -92,33 +78,36 @@ class Generator:
 class RAG:
     def __init__(self):
         self.generator = Generator()
-        self.webscraper = WebScraper()
+        self.toolparser = ToolParseAndExecute()
     
-    def webscrape_and_generate(self, query: str) -> str:
-        results = self.webscraper.search(query, num_results=3)
-        
-        if results:
-            print("\n--- Extracted Search Results (Title and URL) ---")
-            for i, result in enumerate(results):
-                print(f"Result {i+1}:")
-                print(f"  Title: {result['title']}")
-                print(f"  URL:   {result['url']}")
-                print("-" * 20)
-
-        plain_text = self.webscraper.scrape_url(results[0]['url'])
-        combined_query = f"{query}\n\nWeb Information:\n{plain_text[:MAX_SCRAPE_CHARS]}"
-        messages = [
-            {"role": "system", "content": QWEN_PERSONALITY_PROMPT}, 
-            {"role": "user", "content": combined_query}                        
-        ]
-        return self.generator.generate(messages)
+    # def generate(self, query: str) -> str:
+    #     messages = [
+    #             {"role": "system", "content": SERVER_CONFIG.QWEN_PERSONALITY_PROMPT}, 
+    #             {"role": "user", "content": query}                        
+    #         ]
+    #     return self.generator.generate(messages)
     
-    def generate(self, query: str) -> str:
+    def generate_with_tool_parsing(self, query: str) -> str:
         messages = [
-                {"role": "system", "content": QWEN_PERSONALITY_PROMPT}, 
+                {"role": "system", "content": SERVER_CONFIG.QWEN_PERSONALITY_PROMPT}, 
                 {"role": "user", "content": query}                        
             ]
-        return self.generator.generate(messages)
+        
+        initial = self.generator.generate(messages, True)
+
+        parsed_result = self.toolparser.parse_tool_call(initial)
+        if parsed_result is None:
+            return "Tool call failed to parse."
+
+        # round 2 generation with tool results
+        new_messages = [
+                {"role": "system", "content": f"{SERVER_CONFIG.QWEN_PERSONALITY_PROMPT}\n\n {parsed_result}"}, 
+                {"role": "user", "content": query}                        
+            ]
+        
+        final_result = self.generator.generate(new_messages, False)
+        print("Final Result:\n"+final_result)
+        return final_result
     
 
 async def handle_rag_query( query: str, rag_method: Callable[str, Any]) -> JSONResponse:
@@ -127,7 +116,6 @@ async def handle_rag_query( query: str, rag_method: Callable[str, Any]) -> JSONR
 
     try:
         response_text = await run_in_threadpool(rag_method, query)
-
         return JSONResponse(
             content={"query": query, "response": response_text},
             media_type="application/json"
@@ -148,15 +136,10 @@ app = FastAPI(lifespan=lifespan, title="RAG API Server")
 @app.get("/")
 def read_root():
     return {"status": "ok", "message": "RAG API is running. Use /query to ask a question."}
-
-@app.post("/websearch_query")
-async def query_llm_websearch(query: str = Query(..., description="The query to send to the LLM to search the web.")):
-    return await handle_rag_query(query, global_rag.webscrape_and_generate)
-
     
 @app.post("/query")
 async def query_llm(query: str = Query(..., description="The query to send to the LLM.")):
-    return await handle_rag_query(query, global_rag.generate)
+    return await handle_rag_query(query, global_rag.generate_with_tool_parsing)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

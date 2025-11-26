@@ -9,8 +9,6 @@ from rag_api_client import query_rag_api_json
 # Discord & Client Settings
 # -----------------------------
 DISCORD_MAX_CHARS = 2000 # The character limit for a single Discord message
-TRUNCATION_SUFFIX = "\n\n... (Response cut short to maintain coherence and character limit)"
-
 
 # --- Configuration Loading ---
 def load_config():
@@ -86,7 +84,11 @@ async def rag_query_command(interaction: discord.Interaction, prompt: str):
         #     media_type="application/json"
         # )
     response_data = await query_rag_api_json(RAG_URL_QUERY, prompt)
-    final_response_text = response_data['response']
+    response = response_data['response']
+    response.replace("<|im_end|>", " ") # filter out qwen bullshit
+
+    final_response_text = "**User:** " + prompt + "\n"
+    final_response_text = final_response_text + "**Answer**\n" + response
     await interaction.edit_original_response(content=final_response_text)
 
 @bot.tree.command(name="ask_web", description="Ask dirty ragger your desire.. But with web search")
@@ -95,7 +97,11 @@ async def rag_query_command(interaction: discord.Interaction, prompt: str):
     await interaction.response.defer()
 
     response_data = await query_rag_api_json(RAG_URL_WEB_QUERY, prompt)
-    final_response_text = response_data['response']
+    response = response_data['response']
+    response.replace("<|im_end|>", " ") # filter out qwen bullshit
+    
+    final_response_text = "**User:** " + prompt + "\n"
+    final_response_text = final_response_text + "**Answer**\n" + response
     await interaction.edit_original_response(content=final_response_text)
 
 if __name__ == '__main__':
