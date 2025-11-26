@@ -2,10 +2,8 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import configparser
-import asyncio
 import os
-import re
-from rag_api_client import query_rag_api
+from rag_api_client import query_rag_api_json
 
 # -----------------------------
 # Discord & Client Settings
@@ -82,38 +80,23 @@ async def on_ready():
 async def rag_query_command(interaction: discord.Interaction, prompt: str):
     await interaction.response.defer()
 
-    text_generator = await query_rag_api(RAG_URL, prompt)
-
-    # Calculate the max length for the streaming content *after* the header
-    initial_message = (
-        f"**Question:** `{prompt}`\n"
-        f"**Answer:**\n"
-    )
-
-    # 4. Final Update
-    final_response_text = text_generator
-    final_content = initial_message + final_response_text
-    
-    await interaction.edit_original_response(content=final_content)
+    # Reponse format is as such
+        #     return JSONResponse(
+        #     content={"query": query, "response": response_text},
+        #     media_type="application/json"
+        # )
+    response_data = await query_rag_api_json(RAG_URL_QUERY, prompt)
+    final_response_text = response_data['response']
+    await interaction.edit_original_response(content=final_response_text)
 
 @bot.tree.command(name="ask_web", description="Ask dirty ragger your desire.. But with web search")
 @app_commands.describe(prompt="The question you want to ask.")
 async def rag_query_command(interaction: discord.Interaction, prompt: str):
     await interaction.response.defer()
 
-    text_generator = await query_rag_api(RAG_URL, prompt)
-
-    # Calculate the max length for the streaming content *after* the header
-    initial_message = (
-        f"**Question:** `{prompt}`\n"
-        f"**Answer:**\n"
-    )
-
-    # 4. Final Update
-    final_response_text = text_generator
-    final_content = initial_message + final_response_text
-    
-    await interaction.edit_original_response(content=final_content)
+    response_data = await query_rag_api_json(RAG_URL_WEB_QUERY, prompt)
+    final_response_text = response_data['response']
+    await interaction.edit_original_response(content=final_response_text)
 
 if __name__ == '__main__':
     print(f"RAG Server URL: {RAG_URL_QUERY} - {RAG_URL_WEB_QUERY}")
