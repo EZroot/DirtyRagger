@@ -9,6 +9,8 @@ from typing import List, Dict, Any, Callable
 import uvicorn
 
 from rag_server_config import RAGConfig
+from rag_server_generator import Generator
+from rag_server_reranker import QwenReranker
 from rag_server_tool_pass import ToolParseAndExecute
 
 global SERVER_CONFIG
@@ -37,56 +39,13 @@ def model_load_kwargs(device: str) -> Dict[str, Any]:
             "device_map": "cpu",
             "low_cpu_mem_usage": True,
         }
-    
-class Generator:
-    def __init__(self, model_name=SERVER_CONFIG.GEN_MODEL, device=SERVER_CONFIG.DEVICE_GENERATOR):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(
-                    model_name, 
-                    **model_load_kwargs(device)
-                ).eval()
-        if device == "cuda" and torch.__version__ >= "2.0":
-            self.model = torch.compile(self.model, mode="reduce-overhead")
-            
-    @torch.no_grad()
-    def generate(self, messages: List[dict], usetools: bool, max_new_tokens=SERVER_CONFIG.MAX_GEN_TOKENS) -> str:
-        if usetools:
-            text = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, enable_thinking=SERVER_CONFIG.ENABLED_THINKING, tools=SERVER_CONFIG.TOOL_SCHEMAS
-            )
-        else:
-            text = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, enable_thinking=SERVER_CONFIG.ENABLED_THINKING
-            )
-        
-        enc = self.tokenizer([text], return_tensors="pt")
-        # move each tensor directly to target device to avoid temporary full-GPU copy
-        inputs = {k: v.to(self.model.device, non_blocking=True) for k, v in enc.items()}
-        
-        out = self.model.generate(
-            **inputs, 
-            max_new_tokens=max_new_tokens,
-            do_sample=True, 
-            use_cache=True 
-        )
-        
-        out_ids = out[0][inputs["input_ids"].shape[1]:]
-        response = self.tokenizer.decode(out_ids, skip_special_tokens=False)
-        
-        return response
 
 class RAG:
     def __init__(self):
-        self.generator = Generator()
+        self.generator = Generator(model_load_kwargs=model_load_kwargs(SERVER_CONFIG.DEVICE_GENERATOR))
+        self.reranker = QwenReranker(model_load_kwargs=model_load_kwargs(SERVER_CONFIG.DEVICE_RERANKER))
         self.toolparser = ToolParseAndExecute()
-    
-    # def generate(self, query: str) -> str:
-    #     messages = [
-    #             {"role": "system", "content": SERVER_CONFIG.QWEN_PERSONALITY_PROMPT}, 
-    #             {"role": "user", "content": query}                        
-    #         ]
-    #     return self.generator.generate(messages)
-    
+
     def generate_with_tool_parsing(self, query: str) -> str:
         messages = [
                 {"role": "system", "content": SERVER_CONFIG.QWEN_PERSONALITY_PROMPT}, 
