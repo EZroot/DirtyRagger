@@ -2,13 +2,14 @@ from typing import Any, Callable, Dict, List
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from rag_server_config import RAGConfig
+from rag_server_utils import model_load_kwargs
 
 
 global SERVER_CONFIG
 SERVER_CONFIG = RAGConfig()
 
 class Generator:
-    def __init__(self, model_load_kwargs: Callable[[str], Dict[str, Any]], model_name=SERVER_CONFIG.GEN_MODEL, device=SERVER_CONFIG.DEVICE_GENERATOR):
+    def __init__(self, model_name=SERVER_CONFIG.GEN_MODEL, device=SERVER_CONFIG.DEVICE_GENERATOR):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
                     model_name, 

@@ -3,12 +3,13 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rag_server_config import RAGConfig
+from rag_server_utils import model_load_kwargs
 
 global SERVER_CONFIG
 SERVER_CONFIG = RAGConfig()
 
 class QwenReranker:
-    def __init__(self, model_load_kwargs: Callable[[str], Dict[str, Any]], model_name: str = SERVER_CONFIG.RERANKER_MODEL, device: str = SERVER_CONFIG.DEVICE_RERANKER, reranker_max_input: int = SERVER_CONFIG.RERANKER_MAX_INPUT):
+    def __init__(self, model_name: str = SERVER_CONFIG.RERANKER_MODEL, device: str = SERVER_CONFIG.DEVICE_RERANKER, reranker_max_input: int = SERVER_CONFIG.QWEN_PERSONALITY_RESPONSE_TOKENS):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
