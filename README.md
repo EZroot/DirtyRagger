@@ -1,22 +1,58 @@
 # DirtyRagger
 
-Run rag_server.py
+A working **RAG (Retrieval-Augmented Generation) prototype** with local document embeddings, vector search, web search, and tool integration.
 
-Run rag_discord_bot.py
+***NOTE: Working on a 2060 RTX with ~6GB of memory!***
 
+---
 
+## Setup
 
+1. Install dependencies:
+``` bash
+pip install -r requirements.txt
+```
 
-or you can 
+2. (Optional) Place your documents in the `documents/` folder.
 
+3. (Optional) Build the database:
+```bash
+python build_db.py
+```
+This will embed documents into a FAISS vector store.
 
-Run rag_server.py
+---
 
-Run rag_client.py (local)
+## Usage
 
+### Run the RAG server
+```bash
+python rag_server.py
+```
 
+### Query locally (terminal client)
+```bash
+python rag_client.py
+```
 
-or you can
+### Query via Discord bot
+```bash
+python rag_discord_bot.py
+```
 
+---
 
-Run rag.py for local query and responses
+## Features
+
+- Embeds documents and stores them in a FAISS vector store  
+- Retrieves relevant knowledge for questions  
+- Supports **web searches** for additional context  
+- Tool integration for advanced RAG workflows  
+
+---
+
+## Notes
+
+- `rag_server.py` Runs embedding, reranking, generation, websearch, and tool passes and allows for url queries
+- `rag_client.py` allow for local queries
+- `rag_discord_bot.py` allow for queries and responses through discord

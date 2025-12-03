@@ -14,7 +14,7 @@ import PyPDF2
 DOCS_DIR = "./documents"
 DATA_DIR = "./data"
 EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-BATCH_SIZE = 16
+BATCH_SIZE = 4
 
 os.makedirs(DOCS_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -106,18 +106,22 @@ def main():
     all_new_meta = []
     all_new_texts = []
 
-    files = sorted(os.listdir(DOCS_DIR))
-    for fn in files:
-        path = os.path.join(DOCS_DIR, fn)
-        if not os.path.isfile(path):
-            continue
-        new_meta, new_texts = process_file(path)
-        if new_meta:
-            print(f"[+] {fn}: {len(new_meta)} new chunks")
-        else:
-            print(f"[-] {fn}: no new chunks")
-        all_new_meta.extend(new_meta)
-        all_new_texts.extend(new_texts)
+    # --- START OF MODIFICATION ---
+    # Use os.walk to recursively find all files in DOCS_DIR
+    for root, _, filenames in os.walk(DOCS_DIR):
+        for fn in sorted(filenames): # Sort for consistent processing order
+            path = os.path.join(root, fn)
+            # os.walk only yields files, so we don't need the os.path.isfile(path) check
+    # --- END OF MODIFICATION ---
+            
+            new_meta, new_texts = process_file(path)
+            if new_meta:
+                # Use the full path for clearer output in a recursive scan
+                print(f"[+] {path}: {len(new_meta)} new chunks") 
+            else:
+                print(f"[-] {path}: no new chunks")
+            all_new_meta.extend(new_meta)
+            all_new_texts.extend(new_texts)
 
     if not all_new_texts:
         print("No new chunks to index.")

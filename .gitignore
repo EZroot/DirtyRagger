@@ -3,3 +3,5 @@ documents/
 data/
 discord_bot_config.ini
 qwen_env/
+
+rag_server_config.json
